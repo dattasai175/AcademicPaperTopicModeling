@@ -1,5 +1,5 @@
 """
-Evaluation and comparison framework for topic modeling and classification.
+Evaluation and analysis framework for comparing LDA topics with arXiv categories.
 """
 
 import os
@@ -7,11 +7,12 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
+from collections import Counter
 from sklearn.metrics import adjusted_rand_score, normalized_mutual_info_score
-from sklearn.manifold import TSNE
-from sklearn.decomposition import PCA
 import logging
-from config import RESULTS_DIR, PROCESSED_DATA_DIR
+from config import (
+    RESULTS_DIR, PROCESSED_DATA_DIR, TOP_WORDS_PER_TOPIC, TOP_CATEGORIES_PER_TOPIC
+)
 from utils import (
     ensure_dir, load_pickle, load_json, save_json, load_dataframe,
     get_dominant_topic, logger
@@ -28,316 +29,492 @@ except OSError:
 sns.set_palette("husl")
 
 
-def compare_topic_clusters_vs_classification(document_topics, classification_labels, 
-                                            topic_to_subfield_mapping):
+def get_dominant_topics(document_topics):
     """
-    Compare unsupervised topic clusters with supervised classifications.
+    Get dominant topic for each document.
     
     Args:
-        document_topics: Topic distributions for documents
-        classification_labels: Labels from supervised classification
-        topic_to_subfield_mapping: Mapping from topics to subfields
+        document_topics: Array of topic distributions (n_documents x n_topics)
         
     Returns:
-        Dictionary with comparison metrics
+        Array of dominant topic indices
     """
-    logger.info("Comparing topic clusters with supervised classifications...")
+    return np.array([get_dominant_topic(dist) for dist in document_topics])
+
+
+def analyze_category_distribution(df):
+    """
+    Analyze distribution of arXiv categories in the dataset.
     
-    # Get dominant topic for each document
-    dominant_topics = np.array([get_dominant_topic(dist) for dist in document_topics])
+    Args:
+        df: DataFrame with category information
+        
+    Returns:
+        Dictionary with category statistics
+    """
+    logger.info("Analyzing category distribution...")
     
-    # Map topics to subfields
-    topic_labels = np.array([
-        topic_to_subfield_mapping.get(topic_id, 'Other')
-        for topic_id in dominant_topics
-    ])
+    # Primary category distribution
+    primary_cat_counts = df['primary_category'].value_counts()
     
-    # Calculate alignment metrics
-    # Adjusted Rand Index
-    ari = adjusted_rand_score(classification_labels, topic_labels)
+    # All categories distribution (flatten categories column)
+    all_categories = []
+    for cats_str in df['categories'].dropna():
+        if isinstance(cats_str, str):
+            cats = [cat.strip() for cat in cats_str.split(',')]
+            all_categories.extend(cats)
     
-    # Normalized Mutual Information
-    nmi = normalized_mutual_info_score(classification_labels, topic_labels)
-    
-    # Agreement percentage
-    agreement = np.mean(classification_labels == topic_labels)
-    
-    # Create comparison DataFrame
-    comparison_df = pd.DataFrame({
-        'topic_label': topic_labels,
-        'classification_label': classification_labels,
-        'agreement': classification_labels == topic_labels
-    })
-    
-    # Per-class agreement
-    per_class_agreement = {}
-    for label in np.unique(classification_labels):
-        mask = classification_labels == label
-        if np.sum(mask) > 0:
-            per_class_agreement[label] = np.mean(topic_labels[mask] == label)
+    all_cat_counts = Counter(all_categories)
     
     results = {
-        'adjusted_rand_index': float(ari),
-        'normalized_mutual_info': float(nmi),
-        'overall_agreement': float(agreement),
-        'per_class_agreement': per_class_agreement,
-        'comparison_df': comparison_df
+        'primary_category_counts': primary_cat_counts.to_dict(),
+        'all_category_counts': dict(all_cat_counts),
+        'num_unique_primary_categories': len(primary_cat_counts),
+        'num_unique_all_categories': len(all_cat_counts),
+        'total_papers': len(df)
     }
     
-    logger.info(f"Adjusted Rand Index: {ari:.4f}")
-    logger.info(f"Normalized Mutual Information: {nmi:.4f}")
-    logger.info(f"Overall Agreement: {agreement:.4f}")
+    logger.info(f"Found {results['num_unique_primary_categories']} unique primary categories")
+    logger.info(f"Found {results['num_unique_all_categories']} unique categories (including secondary)")
     
     return results
 
 
-def visualize_confusion_matrix(confusion_matrix, class_names, output_path=None):
+def analyze_topic_category_alignment(document_topics, df, topic_words=None):
     """
-    Visualize confusion matrix.
+    Analyze alignment between LDA topics and arXiv categories.
     
     Args:
-        confusion_matrix: Confusion matrix array
-        class_names: List of class names
+        document_topics: Array of topic distributions (n_documents x n_topics)
+        df: DataFrame with category information
+        topic_words: Optional list of topic words for labeling
+        
+    Returns:
+        Dictionary with alignment analysis results
+    """
+    logger.info("Analyzing topic-category alignment...")
+    
+    # Get dominant topics
+    dominant_topics = get_dominant_topics(document_topics)
+    
+    # Ensure DataFrame has the right length
+    if len(df) != len(dominant_topics):
+        logger.warning(f"DataFrame length ({len(df)}) != document_topics length ({len(dominant_topics)})")
+        min_len = min(len(df), len(dominant_topics))
+        df = df.iloc[:min_len]
+        dominant_topics = dominant_topics[:min_len]
+    
+    # Add dominant topic to DataFrame
+    df_analysis = df.copy()
+    df_analysis['dominant_topic'] = dominant_topics
+    
+    # Analyze primary category distribution per topic
+    topic_primary_cat_dist = {}
+    topic_all_cat_dist = {}
+    
+    num_topics = document_topics.shape[1]
+    
+    for topic_id in range(num_topics):
+        topic_mask = dominant_topics == topic_id
+        topic_papers = df_analysis[topic_mask]
+        
+        if len(topic_papers) > 0:
+            # Primary category distribution
+            primary_cats = topic_papers['primary_category'].value_counts(normalize=True)
+            topic_primary_cat_dist[topic_id] = primary_cats.to_dict()
+            
+            # All categories distribution
+            all_cats_list = []
+            for cats_str in topic_papers['categories'].dropna():
+                if isinstance(cats_str, str):
+                    cats = [cat.strip() for cat in cats_str.split(',')]
+                    all_cats_list.extend(cats)
+            
+            all_cats_counter = Counter(all_cats_list)
+            total = sum(all_cats_counter.values())
+            if total > 0:
+                topic_all_cat_dist[topic_id] = {
+                    cat: count / total 
+                    for cat, count in all_cats_counter.items()
+                }
+            else:
+                topic_all_cat_dist[topic_id] = {}
+        else:
+            topic_primary_cat_dist[topic_id] = {}
+            topic_all_cat_dist[topic_id] = {}
+    
+    # Calculate purity metrics
+    # Purity: for each topic, what fraction of papers belong to the most common category
+    topic_purities = {}
+    for topic_id in range(num_topics):
+        topic_mask = dominant_topics == topic_id
+        topic_papers = df_analysis[topic_mask]
+        
+        if len(topic_papers) > 0:
+            primary_cats = topic_papers['primary_category'].value_counts()
+            if len(primary_cats) > 0:
+                purity = primary_cats.iloc[0] / len(topic_papers)
+                topic_purities[topic_id] = purity
+            else:
+                topic_purities[topic_id] = 0.0
+        else:
+            topic_purities[topic_id] = 0.0
+    
+    # Calculate overall metrics
+    # Convert primary categories to numeric labels for ARI/NMI
+    unique_cats = df_analysis['primary_category'].unique()
+    cat_to_label = {cat: idx for idx, cat in enumerate(unique_cats)}
+    category_labels = np.array([cat_to_label[cat] for cat in df_analysis['primary_category']])
+    
+    # Calculate Adjusted Rand Index and Normalized Mutual Information
+    ari = adjusted_rand_score(category_labels, dominant_topics)
+    nmi = normalized_mutual_info_score(category_labels, dominant_topics)
+    
+    results = {
+        'topic_primary_category_distribution': topic_primary_cat_dist,
+        'topic_all_category_distribution': topic_all_cat_dist,
+        'topic_purities': topic_purities,
+        'adjusted_rand_index': float(ari),
+        'normalized_mutual_info': float(nmi),
+        'average_purity': float(np.mean(list(topic_purities.values()))),
+        'num_topics': num_topics,
+        'num_categories': len(unique_cats)
+    }
+    
+    logger.info(f"Adjusted Rand Index: {ari:.4f}")
+    logger.info(f"Normalized Mutual Information: {nmi:.4f}")
+    logger.info(f"Average Topic Purity: {results['average_purity']:.4f}")
+    
+    return results, df_analysis
+
+
+def visualize_category_distribution(category_stats, output_path=None):
+    """
+    Visualize distribution of arXiv categories.
+    
+    Args:
+        category_stats: Dictionary from analyze_category_distribution
         output_path: Path to save the plot
     """
-    plt.figure(figsize=(12, 10))
+    fig, axes = plt.subplots(1, 2, figsize=(16, 6))
     
-    # Normalize confusion matrix
-    cm_normalized = confusion_matrix.astype('float') / confusion_matrix.sum(axis=1)[:, np.newaxis]
+    # Primary categories
+    primary_cats = category_stats['primary_category_counts']
+    top_primary = dict(sorted(primary_cats.items(), key=lambda x: x[1], reverse=True)[:15])
     
-    sns.heatmap(
-        cm_normalized,
-        annot=True,
-        fmt='.2f',
-        cmap='Blues',
-        xticklabels=class_names,
-        yticklabels=class_names,
-        cbar_kws={'label': 'Normalized Frequency'}
-    )
+    axes[0].barh(range(len(top_primary)), list(top_primary.values()))
+    axes[0].set_yticks(range(len(top_primary)))
+    axes[0].set_yticklabels(list(top_primary.keys()))
+    axes[0].set_xlabel('Number of Papers', fontsize=12)
+    axes[0].set_title('Top 15 Primary Categories', fontsize=14, fontweight='bold')
+    axes[0].invert_yaxis()
+    axes[0].grid(True, alpha=0.3, axis='x')
     
-    plt.title('Confusion Matrix (Normalized)', fontsize=14, fontweight='bold')
-    plt.ylabel('True Label', fontsize=12)
-    plt.xlabel('Predicted Label', fontsize=12)
-    plt.xticks(rotation=45, ha='right')
-    plt.yticks(rotation=0)
+    # All categories
+    all_cats = category_stats['all_category_counts']
+    top_all = dict(sorted(all_cats.items(), key=lambda x: x[1], reverse=True)[:15])
+    
+    axes[1].barh(range(len(top_all)), list(top_all.values()))
+    axes[1].set_yticks(range(len(top_all)))
+    axes[1].set_yticklabels(list(top_all.keys()))
+    axes[1].set_xlabel('Number of Papers', fontsize=12)
+    axes[1].set_title('Top 15 All Categories (Including Secondary)', fontsize=14, fontweight='bold')
+    axes[1].invert_yaxis()
+    axes[1].grid(True, alpha=0.3, axis='x')
+    
     plt.tight_layout()
     
     if output_path:
         ensure_dir(os.path.dirname(output_path))
         plt.savefig(output_path, dpi=300, bbox_inches='tight')
-        logger.info(f"Saved confusion matrix to {output_path}")
+        logger.info(f"Saved category distribution plot to {output_path}")
     
     plt.close()
 
 
-def visualize_topic_classification_alignment(comparison_df, output_path=None):
+def visualize_topic_category_heatmap(alignment_results, output_path=None):
     """
-    Visualize alignment between topic clusters and classifications.
+    Create heatmap showing topic-category alignment.
     
     Args:
-        comparison_df: DataFrame with topic and classification labels
+        alignment_results: Dictionary from analyze_topic_category_alignment
         output_path: Path to save the plot
     """
-    # Create cross-tabulation
-    crosstab = pd.crosstab(
-        comparison_df['topic_label'],
-        comparison_df['classification_label'],
-        normalize='index'
-    )
+    topic_cat_dist = alignment_results['topic_primary_category_distribution']
+    num_topics = alignment_results['num_topics']
     
-    plt.figure(figsize=(12, 8))
+    # Collect all unique categories
+    all_categories = set()
+    for dist in topic_cat_dist.values():
+        all_categories.update(dist.keys())
+    all_categories = sorted(list(all_categories))
+    
+    # Create matrix
+    matrix = np.zeros((num_topics, len(all_categories)))
+    for topic_id, dist in topic_cat_dist.items():
+        for cat_idx, cat in enumerate(all_categories):
+            if cat in dist:
+                matrix[topic_id, cat_idx] = dist[cat]
+    
+    # Create heatmap
+    plt.figure(figsize=(max(12, len(all_categories) * 0.8), max(8, num_topics * 0.6)))
     sns.heatmap(
-        crosstab,
+        matrix,
+        xticklabels=all_categories,
+        yticklabels=[f"Topic {i}" for i in range(num_topics)],
         annot=True,
         fmt='.2f',
         cmap='YlOrRd',
         cbar_kws={'label': 'Proportion'}
     )
-    
-    plt.title('Topic Labels vs Classification Labels', fontsize=14, fontweight='bold')
-    plt.ylabel('Topic Label', fontsize=12)
-    plt.xlabel('Classification Label', fontsize=12)
+    plt.title('Topic-Category Alignment Heatmap\n(Proportion of Primary Categories per Topic)', 
+              fontsize=14, fontweight='bold')
+    plt.xlabel('arXiv Primary Category', fontsize=12)
+    plt.ylabel('LDA Topic', fontsize=12)
     plt.xticks(rotation=45, ha='right')
-    plt.yticks(rotation=0)
     plt.tight_layout()
     
     if output_path:
         ensure_dir(os.path.dirname(output_path))
         plt.savefig(output_path, dpi=300, bbox_inches='tight')
-        logger.info(f"Saved alignment plot to {output_path}")
+        logger.info(f"Saved topic-category heatmap to {output_path}")
     
     plt.close()
 
 
-def visualize_topic_distribution(document_topics, labels=None, output_path=None):
+def visualize_topic_category_stacked_bar(alignment_results, output_path=None, top_n=10):
     """
-    Visualize topic distribution across documents.
+    Create stacked bar chart showing category proportions per topic.
     
     Args:
-        document_topics: Topic distributions
-        labels: Optional labels for coloring
+        alignment_results: Dictionary from analyze_topic_category_alignment
+        output_path: Path to save the plot
+        top_n: Number of top categories to show per topic
+    """
+    topic_cat_dist = alignment_results['topic_primary_category_distribution']
+    num_topics = alignment_results['num_topics']
+    
+    # Get top categories across all topics
+    all_cat_counts = Counter()
+    for dist in topic_cat_dist.values():
+        all_cat_counts.update(dist)
+    top_categories = [cat for cat, _ in all_cat_counts.most_common(top_n)]
+    
+    # Create matrix
+    matrix = np.zeros((num_topics, len(top_categories)))
+    for topic_id, dist in topic_cat_dist.items():
+        for cat_idx, cat in enumerate(top_categories):
+            if cat in dist:
+                matrix[topic_id, cat_idx] = dist[cat]
+    
+    # Create stacked bar chart
+    fig, ax = plt.subplots(figsize=(max(12, num_topics * 0.8), 8))
+    
+    x = np.arange(num_topics)
+    width = 0.8
+    bottom = np.zeros(num_topics)
+    
+    colors = plt.cm.Set3(np.linspace(0, 1, len(top_categories)))
+    
+    for cat_idx, cat in enumerate(top_categories):
+        ax.bar(x, matrix[:, cat_idx], width, label=cat, bottom=bottom, color=colors[cat_idx])
+        bottom += matrix[:, cat_idx]
+    
+    ax.set_xlabel('LDA Topic', fontsize=12)
+    ax.set_ylabel('Proportion of Papers', fontsize=12)
+    ax.set_title(f'Category Distribution per Topic\n(Top {top_n} Categories)', 
+                 fontsize=14, fontweight='bold')
+    ax.set_xticks(x)
+    ax.set_xticklabels([f"Topic {i}" for i in range(num_topics)])
+    ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left', fontsize=8)
+    ax.set_ylim([0, 1])
+    ax.grid(True, alpha=0.3, axis='y')
+    
+    plt.tight_layout()
+    
+    if output_path:
+        ensure_dir(os.path.dirname(output_path))
+        plt.savefig(output_path, dpi=300, bbox_inches='tight')
+        logger.info(f"Saved stacked bar chart to {output_path}")
+    
+    plt.close()
+
+
+def visualize_topic_words(topic_words, output_path=None, words_per_topic=10):
+    """
+    Visualize top words for each topic.
+    
+    Args:
+        topic_words: List of topic words (from get_topic_words)
+        output_path: Path to save the plot
+        words_per_topic: Number of words to show per topic
+    """
+    num_topics = len(topic_words)
+    
+    fig, axes = plt.subplots((num_topics + 2) // 3, 3, figsize=(15, 5 * ((num_topics + 2) // 3)))
+    axes = axes.flatten() if num_topics > 1 else [axes]
+    
+    for topic_id, words in enumerate(topic_words):
+        if topic_id >= len(axes):
+            break
+        
+        top_words = words[:words_per_topic]
+        words_list = [w[0] for w in top_words]
+        probs_list = [w[1] for w in top_words]
+        
+        axes[topic_id].barh(range(len(words_list)), probs_list)
+        axes[topic_id].set_yticks(range(len(words_list)))
+        axes[topic_id].set_yticklabels(words_list)
+        axes[topic_id].set_xlabel('Probability', fontsize=10)
+        axes[topic_id].set_title(f'Topic {topic_id}', fontsize=12, fontweight='bold')
+        axes[topic_id].invert_yaxis()
+        axes[topic_id].grid(True, alpha=0.3, axis='x')
+    
+    # Hide extra subplots
+    for idx in range(num_topics, len(axes)):
+        axes[idx].axis('off')
+    
+    plt.suptitle('Top Words per Topic', fontsize=16, fontweight='bold', y=0.995)
+    plt.tight_layout()
+    
+    if output_path:
+        ensure_dir(os.path.dirname(output_path))
+        plt.savefig(output_path, dpi=300, bbox_inches='tight')
+        logger.info(f"Saved topic words visualization to {output_path}")
+    
+    plt.close()
+
+
+def visualize_topic_distribution_over_time(df_analysis, output_path=None):
+    """
+    Visualize topic distribution over time (by year).
+    
+    Args:
+        df_analysis: DataFrame with dominant_topic and year columns
         output_path: Path to save the plot
     """
-    # Calculate average topic distribution
-    avg_topic_dist = np.mean(document_topics, axis=0)
+    if 'year' not in df_analysis.columns:
+        logger.warning("Year column not found, skipping time-based visualization")
+        return
     
-    plt.figure(figsize=(10, 6))
-    plt.bar(range(len(avg_topic_dist)), avg_topic_dist)
-    plt.xlabel('Topic ID', fontsize=12)
-    plt.ylabel('Average Probability', fontsize=12)
-    plt.title('Average Topic Distribution Across Documents', fontsize=14, fontweight='bold')
-    plt.grid(True, alpha=0.3, axis='y')
+    # Group by year and topic
+    topic_year_counts = df_analysis.groupby(['year', 'dominant_topic']).size().unstack(fill_value=0)
+    
+    # Normalize to proportions
+    topic_year_props = topic_year_counts.div(topic_year_counts.sum(axis=1), axis=0)
+    
+    # Create stacked area chart
+    fig, ax = plt.subplots(figsize=(12, 6))
+    
+    topic_year_props.plot(kind='area', ax=ax, stacked=True, alpha=0.7)
+    
+    ax.set_xlabel('Year', fontsize=12)
+    ax.set_ylabel('Proportion of Papers', fontsize=12)
+    ax.set_title('Topic Distribution Over Time', fontsize=14, fontweight='bold')
+    ax.legend(title='Topic', bbox_to_anchor=(1.05, 1), loc='upper left', fontsize=8)
+    ax.grid(True, alpha=0.3)
+    
     plt.tight_layout()
     
     if output_path:
         ensure_dir(os.path.dirname(output_path))
         plt.savefig(output_path, dpi=300, bbox_inches='tight')
-        logger.info(f"Saved topic distribution plot to {output_path}")
+        logger.info(f"Saved topic distribution over time plot to {output_path}")
     
     plt.close()
 
 
-def create_error_analysis(df, predictions, true_labels, output_path=None):
+def generate_analysis_report():
     """
-    Create error analysis report.
-    
-    Args:
-        df: DataFrame with abstracts
-        predictions: Predicted labels
-        true_labels: True labels
-        output_path: Path to save the report
-    """
-    error_mask = predictions != true_labels
-    
-    if np.sum(error_mask) == 0:
-        logger.info("No errors found!")
-        return
-    
-    error_data = {
-        'true_label': true_labels[error_mask],
-        'predicted_label': predictions[error_mask]
-    }
-    
-    if df is not None:
-        if 'title' in df.columns:
-            error_data['title'] = df['title'].values[error_mask]
-        if 'abstract' in df.columns:
-            error_data['abstract'] = df['abstract'].values[error_mask]
-    
-    error_df = pd.DataFrame(error_data)
-    
-    # Error statistics by class
-    error_stats = pd.DataFrame({
-        'true_label': true_labels[error_mask],
-        'predicted_label': predictions[error_mask]
-    }).value_counts().reset_index(name='count')
-    
-    logger.info("\n=== Error Analysis ===")
-    logger.info(f"Total errors: {len(error_df)}")
-    logger.info(f"Error rate: {len(error_df) / len(predictions):.4f}")
-    logger.info("\nError patterns:")
-    logger.info(error_stats.to_string())
-    
-    if output_path:
-        ensure_dir(os.path.dirname(output_path))
-        error_df.to_csv(output_path, index=False)
-        logger.info(f"Saved error analysis to {output_path}")
-
-
-def generate_evaluation_report():
-    """
-    Generate comprehensive evaluation report.
+    Generate comprehensive analysis report comparing LDA topics with arXiv categories.
     
     Returns:
-        Dictionary with all evaluation results
+        Dictionary with all analysis results
     """
-    import os
-    
-    logger.info("Generating comprehensive evaluation report...")
+    logger.info("Generating comprehensive analysis report...")
     
     # Load data
     try:
         df = load_dataframe(f"{PROCESSED_DATA_DIR}/processed_data.csv")
     except Exception as e:
-        logger.warning(f"Could not load processed data: {e}")
-        df = None
+        logger.error(f"Could not load processed data: {e}")
+        return None
     
+    # Load topic modeling results
     document_topics = load_pickle(f"{RESULTS_DIR}/document_topics.pkl")
-    classification_metrics = load_json(f"{RESULTS_DIR}/classification_metrics.json")
-    topic_to_subfield = load_json(f"{RESULTS_DIR}/topic_to_subfield_mapping.json")
-    predictions_df = load_dataframe(f"{RESULTS_DIR}/predictions.csv")
+    topic_words_json = load_json(f"{RESULTS_DIR}/topic_words.json")
     
-    # Get labels
-    true_labels = predictions_df['true_label'].values
-    predicted_labels = predictions_df['predicted_label'].values
+    # Convert topic words to list format
+    topic_words = []
+    for topic_key in sorted(topic_words_json.keys(), key=lambda x: int(x.split('_')[1])):
+        words_dict = topic_words_json[topic_key]
+        words_list = [(word, prob) for word, prob in words_dict.items()]
+        words_list.sort(key=lambda x: x[1], reverse=True)
+        topic_words.append(words_list)
     
-    # Load test set indices
-    try:
-        test_indices = load_pickle(f"{RESULTS_DIR}/test_indices.pkl")
-        # Get document topics for test set only
-        test_document_topics = document_topics[test_indices]
-    except Exception as e:
-        logger.warning(f"Could not load test indices: {e}. Using all documents for comparison.")
-        test_document_topics = document_topics
-        test_indices = np.arange(len(document_topics))
+    # Analyze category distribution
+    category_stats = analyze_category_distribution(df)
+    save_json(category_stats, f"{RESULTS_DIR}/category_statistics.json")
     
-    # Compare topic clusters with classification on test set
-    comparison_results = compare_topic_clusters_vs_classification(
-        test_document_topics, true_labels, topic_to_subfield
+    # Analyze topic-category alignment
+    alignment_results, df_analysis = analyze_topic_category_alignment(
+        document_topics, df, topic_words
+    )
+    save_json(alignment_results, f"{RESULTS_DIR}/topic_category_alignment.json")
+    
+    # Save analysis DataFrame
+    df_analysis.to_csv(f"{RESULTS_DIR}/analysis_data.csv", index=False)
+    
+    # Create visualizations
+    visualize_category_distribution(
+        category_stats,
+        f"{RESULTS_DIR}/category_distribution.png"
     )
     
-    # Save comparison results
-    save_json({
-        'adjusted_rand_index': comparison_results['adjusted_rand_index'],
-        'normalized_mutual_info': comparison_results['normalized_mutual_info'],
-        'overall_agreement': comparison_results['overall_agreement'],
-        'per_class_agreement': comparison_results['per_class_agreement']
-    }, f"{RESULTS_DIR}/comparison_results.json")
-    
-    # Visualizations
-    visualize_confusion_matrix(
-        np.array(classification_metrics['confusion_matrix']),
-        classification_metrics['class_names'],
-        f"{RESULTS_DIR}/confusion_matrix.png"
+    visualize_topic_category_heatmap(
+        alignment_results,
+        f"{RESULTS_DIR}/topic_category_heatmap.png"
     )
     
-    visualize_topic_classification_alignment(
-        comparison_results['comparison_df'],
-        f"{RESULTS_DIR}/topic_classification_alignment.png"
+    visualize_topic_category_stacked_bar(
+        alignment_results,
+        f"{RESULTS_DIR}/topic_category_stacked_bar.png"
     )
     
-    visualize_topic_distribution(
-        document_topics,
-        output_path=f"{RESULTS_DIR}/topic_distribution.png"
+    visualize_topic_words(
+        topic_words,
+        f"{RESULTS_DIR}/topic_words_visualization.png"
     )
     
-    # Error analysis (only if we have the full dataframe)
-    try:
-        create_error_analysis(
-            df,
-            predicted_labels,
-            true_labels,
-            f"{RESULTS_DIR}/error_analysis.csv"
-        )
-    except Exception as e:
-        logger.warning(f"Could not create error analysis: {e}")
+    visualize_topic_distribution_over_time(
+        df_analysis,
+        f"{RESULTS_DIR}/topic_distribution_over_time.png"
+    )
     
     # Print summary
-    logger.info("\n=== Evaluation Summary ===")
-    logger.info(f"Classification Accuracy: {classification_metrics['accuracy']:.4f}")
-    logger.info(f"Classification F1-score: {classification_metrics['f1_weighted']:.4f}")
-    logger.info(f"Topic-Classification Agreement: {comparison_results['overall_agreement']:.4f}")
-    logger.info(f"Adjusted Rand Index: {comparison_results['adjusted_rand_index']:.4f}")
-    logger.info(f"Normalized Mutual Information: {comparison_results['normalized_mutual_info']:.4f}")
+    logger.info("\n=== Analysis Summary ===")
+    logger.info(f"Total papers analyzed: {len(df_analysis)}")
+    logger.info(f"Number of topics: {alignment_results['num_topics']}")
+    logger.info(f"Number of unique categories: {alignment_results['num_categories']}")
+    logger.info(f"Adjusted Rand Index: {alignment_results['adjusted_rand_index']:.4f}")
+    logger.info(f"Normalized Mutual Information: {alignment_results['normalized_mutual_info']:.4f}")
+    logger.info(f"Average Topic Purity: {alignment_results['average_purity']:.4f}")
+    
+    logger.info("\n=== Top Categories per Topic ===")
+    for topic_id in range(alignment_results['num_topics']):
+        dist = alignment_results['topic_primary_category_distribution'][topic_id]
+        top_cats = sorted(dist.items(), key=lambda x: x[1], reverse=True)[:TOP_CATEGORIES_PER_TOPIC]
+        logger.info(f"\nTopic {topic_id}:")
+        for cat, prop in top_cats:
+            logger.info(f"  {cat}: {prop:.2%}")
     
     return {
-        'classification_metrics': classification_metrics,
-        'comparison_results': comparison_results
+        'category_stats': category_stats,
+        'alignment_results': alignment_results,
+        'df_analysis': df_analysis
     }
 
 
 if __name__ == "__main__":
-    import os
-    results = generate_evaluation_report()
-    print("\nEvaluation complete!")
-
+    results = generate_analysis_report()
+    print("\nAnalysis complete!")

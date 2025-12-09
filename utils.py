@@ -1,5 +1,5 @@
 """
-Utility functions for the topic modeling and classification pipeline.
+Utility functions for the topic modeling and category alignment analysis pipeline.
 """
 
 import os

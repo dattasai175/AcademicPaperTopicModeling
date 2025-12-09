@@ -16,6 +16,12 @@ def download_nltk_data():
         print(f"✗ Error downloading punkt: {e}")
     
     try:
+        nltk.download('punkt_tab', quiet=True)
+        print("✓ Downloaded punkt_tab")
+    except Exception as e:
+        print(f"✗ Error downloading punkt_tab: {e}")
+    
+    try:
         nltk.download('stopwords', quiet=True)
         print("✓ Downloaded stopwords")
     except Exception as e:

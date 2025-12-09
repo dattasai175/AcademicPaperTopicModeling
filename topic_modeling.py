@@ -15,8 +15,8 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from config import (
     LDA_TOPICS_RANGE, LDA_ALPHA, LDA_BETA, LDA_PASSES, 
-    LDA_ITERATIONS, LDA_RANDOM_STATE, PROCESSED_DATA_DIR, 
-    MODELS_DIR, RESULTS_DIR
+    LDA_ITERATIONS, LDA_RANDOM_STATE, COHERENCE_TYPE,
+    PROCESSED_DATA_DIR, MODELS_DIR, RESULTS_DIR, TOP_WORDS_PER_TOPIC
 )
 from utils import (
     ensure_dir, save_pickle, load_pickle, save_json, 
@@ -71,7 +71,7 @@ def train_lda_model(corpus, dictionary, num_topics, alpha=LDA_ALPHA,
     return model
 
 
-def evaluate_coherence(model, corpus, dictionary, texts, coherence_type='c_v'):
+def evaluate_coherence(model, corpus, dictionary, texts, coherence_type=None):
     """
     Evaluate topic coherence.
     
@@ -85,6 +85,9 @@ def evaluate_coherence(model, corpus, dictionary, texts, coherence_type='c_v'):
     Returns:
         Coherence score
     """
+    if coherence_type is None:
+        coherence_type = COHERENCE_TYPE
+    
     coherence_model = CoherenceModel(
         model=model,
         texts=texts,
@@ -98,7 +101,7 @@ def evaluate_coherence(model, corpus, dictionary, texts, coherence_type='c_v'):
 
 
 def find_optimal_topics(corpus, dictionary, texts, topics_range=None, 
-                       coherence_type='c_v'):
+                       coherence_type=None):
     """
     Find optimal number of topics by evaluating coherence scores.
     
@@ -114,8 +117,11 @@ def find_optimal_topics(corpus, dictionary, texts, topics_range=None,
     """
     if topics_range is None:
         topics_range = LDA_TOPICS_RANGE
+    if coherence_type is None:
+        coherence_type = COHERENCE_TYPE
     
     logger.info(f"Finding optimal number of topics from range: {topics_range}")
+    logger.info(f"Using coherence metric: {coherence_type}")
     
     coherence_scores = []
     models = []
@@ -146,13 +152,14 @@ def find_optimal_topics(corpus, dictionary, texts, topics_range=None,
         'optimal_topics': optimal_topics,
         'optimal_coherence': optimal_coherence,
         'optimal_model': optimal_model,
-        'all_models': models
+        'all_models': models,
+        'coherence_type': coherence_type
     }
     
     return results
 
 
-def get_topic_words(model, num_words=10):
+def get_topic_words(model, num_words=None):
     """
     Extract top words for each topic.
     
@@ -163,6 +170,9 @@ def get_topic_words(model, num_words=10):
     Returns:
         List of tuples (word, probability) for each topic
     """
+    if num_words is None:
+        num_words = TOP_WORDS_PER_TOPIC
+    
     topic_words = []
     for topic_id in range(model.num_topics):
         words = model.show_topic(topic_id, topn=num_words)
@@ -229,14 +239,18 @@ def create_lda_visualization(model, corpus, dictionary, output_path=None):
     """
     logger.info("Creating LDA visualization...")
     
-    vis = gensimvis.prepare(model, corpus, dictionary, sort_topics=False)
-    
-    if output_path:
-        ensure_dir(os.path.dirname(output_path))
-        pyLDAvis.save_html(vis, output_path)
-        logger.info(f"Saved LDA visualization to {output_path}")
-    
-    return vis
+    try:
+        vis = gensimvis.prepare(model, corpus, dictionary, sort_topics=False)
+        
+        if output_path:
+            ensure_dir(os.path.dirname(output_path))
+            pyLDAvis.save_html(vis, output_path)
+            logger.info(f"Saved LDA visualization to {output_path}")
+        
+        return vis
+    except Exception as e:
+        logger.warning(f"Could not create LDA visualization: {e}")
+        return None
 
 
 def run_topic_modeling_pipeline(corpus=None, dictionary=None, texts=None, 
@@ -254,8 +268,6 @@ def run_topic_modeling_pipeline(corpus=None, dictionary=None, texts=None,
     Returns:
         Dictionary with results
     """
-    import os
-    
     # Load data if not provided
     if corpus is None or dictionary is None:
         logger.info("Loading preprocessed data...")
@@ -288,17 +300,18 @@ def run_topic_modeling_pipeline(corpus=None, dictionary=None, texts=None,
             'topics_range': results['topics_range'],
             'coherence_scores': results['coherence_scores'],
             'optimal_topics': results['optimal_topics'],
-            'optimal_coherence': float(results['optimal_coherence'])
+            'optimal_coherence': float(results['optimal_coherence']),
+            'coherence_type': results['coherence_type']
         }, f"{RESULTS_DIR}/coherence_results.json")
     else:
         # Use default number of topics
-        num_topics = LDA_TOPICS_RANGE[2]  # Default to middle value
+        num_topics = LDA_TOPICS_RANGE[len(LDA_TOPICS_RANGE)//2]  # Default to middle value
         logger.info(f"Using default number of topics: {num_topics}")
         model = train_lda_model(corpus, dictionary, num_topics)
         results = {'optimal_model': model, 'optimal_topics': num_topics}
     
     # Get topic words
-    topic_words = get_topic_words(model, num_words=15)
+    topic_words = get_topic_words(model, num_words=TOP_WORDS_PER_TOPIC)
     
     # Print topic words
     logger.info("\n=== Top Words per Topic ===")
@@ -312,6 +325,11 @@ def run_topic_modeling_pipeline(corpus=None, dictionary=None, texts=None,
     model.save(model_path)
     logger.info(f"Saved LDA model to {model_path}")
     
+    # Save dictionary
+    dictionary_path = f"{MODELS_DIR}/lda_dictionary_{num_topics}topics"
+    dictionary.save(dictionary_path)
+    logger.info(f"Saved dictionary to {dictionary_path}")
+    
     # Save topic words
     save_json(
         {f"topic_{i}": {word: float(prob) for word, prob in words} 
@@ -323,31 +341,26 @@ def run_topic_modeling_pipeline(corpus=None, dictionary=None, texts=None,
     save_pickle(doc_topics, f"{RESULTS_DIR}/document_topics.pkl")
     
     # Create visualization
-    try:
-        create_lda_visualization(
-            model, corpus, dictionary,
-            f"{RESULTS_DIR}/lda_visualization.html"
-        )
-    except Exception as e:
-        logger.warning(f"Could not create LDA visualization: {e}")
+    create_lda_visualization(
+        model, corpus, dictionary,
+        f"{RESULTS_DIR}/lda_visualization.html"
+    )
     
     logger.info("Topic modeling pipeline complete!")
     
     return {
         'model': model,
+        'dictionary': dictionary,
         'num_topics': num_topics,
         'topic_words': topic_words,
         'document_topics': doc_topics,
         'corpus': corpus,
-        'dictionary': dictionary,
         'results': results
     }
 
 
 if __name__ == "__main__":
-    import os
     result = run_topic_modeling_pipeline()
     print(f"\nTopic modeling complete!")
     print(f"Optimal number of topics: {result['num_topics']}")
     print(f"Document topics shape: {result['document_topics'].shape}")
-

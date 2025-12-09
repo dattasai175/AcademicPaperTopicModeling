@@ -1,5 +1,5 @@
 """
-Main pipeline orchestrator for academic paper topic modeling and classification.
+Main pipeline orchestrator for arXiv AI Papers Topic Modeling & Category Alignment Analysis.
 """
 
 import logging
@@ -14,14 +14,14 @@ from utils import logger, ensure_dir
 from data_collection import collect_arxiv_abstracts
 from preprocessing import run_preprocessing_pipeline
 from topic_modeling import run_topic_modeling_pipeline
-from classification import run_classification_pipeline
-from evaluation import generate_evaluation_report
+from evaluation import generate_analysis_report
+
 
 def main():
     """Run the complete pipeline."""
     
     logger.info("=" * 60)
-    logger.info("Academic Paper Topic Modeling and Classification Pipeline")
+    logger.info("arXiv AI Papers Topic Modeling & Category Alignment Analysis")
     logger.info("=" * 60)
     
     # Ensure directories exist
@@ -53,6 +53,7 @@ def main():
         
         preprocessing_result = run_preprocessing_pipeline()
         logger.info(f"Preprocessed {len(preprocessing_result['df'])} abstracts")
+        logger.info(f"Dictionary size: {len(preprocessing_result['dictionary'])}")
         
         # Step 3: Topic Modeling
         logger.info("\n" + "=" * 60)
@@ -62,29 +63,18 @@ def main():
         topic_modeling_result = run_topic_modeling_pipeline(
             corpus=preprocessing_result['corpus'],
             dictionary=preprocessing_result['dictionary'],
+            texts=[text.split() for text in preprocessing_result['df']['processed_text'].tolist()],
             find_optimal=True
         )
         logger.info(f"Optimal number of topics: {topic_modeling_result['num_topics']}")
         
-        # Step 4: Classification
+        # Step 4: Analysis & Evaluation
         logger.info("\n" + "=" * 60)
-        logger.info("STEP 4: Classification")
+        logger.info("STEP 4: Analysis & Evaluation")
         logger.info("=" * 60)
         
-        classification_result = run_classification_pipeline(
-            tfidf_matrix=preprocessing_result['tfidf_matrix'],
-            topic_words=topic_modeling_result['topic_words'],
-            document_topics=topic_modeling_result['document_topics']
-        )
-        logger.info(f"Classification accuracy: {classification_result['metrics']['accuracy']:.4f}")
-        
-        # Step 5: Evaluation
-        logger.info("\n" + "=" * 60)
-        logger.info("STEP 5: Evaluation")
-        logger.info("=" * 60)
-        
-        evaluation_result = generate_evaluation_report()
-        logger.info("Evaluation complete!")
+        analysis_result = generate_analysis_report()
+        logger.info("Analysis complete!")
         
         # Final Summary
         logger.info("\n" + "=" * 60)
@@ -92,9 +82,13 @@ def main():
         logger.info("=" * 60)
         logger.info(f"Number of abstracts processed: {len(preprocessing_result['df'])}")
         logger.info(f"Optimal number of topics: {topic_modeling_result['num_topics']}")
-        logger.info(f"Classification accuracy: {classification_result['metrics']['accuracy']:.4f}")
-        logger.info(f"Classification F1-score: {classification_result['metrics']['f1_weighted']:.4f}")
-        logger.info(f"Topic-Classification agreement: {evaluation_result['comparison_results']['overall_agreement']:.4f}")
+        
+        if analysis_result:
+            alignment = analysis_result['alignment_results']
+            logger.info(f"Adjusted Rand Index: {alignment['adjusted_rand_index']:.4f}")
+            logger.info(f"Normalized Mutual Information: {alignment['normalized_mutual_info']:.4f}")
+            logger.info(f"Average Topic Purity: {alignment['average_purity']:.4f}")
+        
         logger.info("\nResults saved in:")
         logger.info(f"  - Models: {MODELS_DIR}/")
         logger.info(f"  - Results: {RESULTS_DIR}/")
@@ -106,4 +100,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
