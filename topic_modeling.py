@@ -64,7 +64,9 @@ def train_lda_model(corpus, dictionary, num_topics, alpha=LDA_ALPHA,
         passes=passes,
         iterations=iterations,
         random_state=random_state,
-        per_word_topics=True
+        per_word_topics=True,
+        chunksize=2000,  # Process documents in chunks for efficiency
+        eval_every=10  # Evaluate model periodically
     )
     
     logger.info(f"LDA model trained with {num_topics} topics")
@@ -339,6 +341,44 @@ def run_topic_modeling_pipeline(corpus=None, dictionary=None, texts=None,
     
     # Save document topics
     save_pickle(doc_topics, f"{RESULTS_DIR}/document_topics.pkl")
+    
+    # Export document-topic distribution as CSV
+    try:
+        if data_file is None:
+            data_file = f"{PROCESSED_DATA_DIR}/processed_data.csv"
+        df_data = pd.read_csv(data_file)
+        
+        # Create DataFrame with document IDs and topic probabilities
+        doc_topic_df = pd.DataFrame(
+            doc_topics,
+            columns=[f'topic_{i}' for i in range(num_topics)]
+        )
+        doc_topic_df.insert(0, 'id', df_data['id'].values[:len(doc_topics)])
+        doc_topic_df.insert(1, 'dominant_topic', doc_topic_df.iloc[:, 1:].idxmax(axis=1).str.replace('topic_', '').astype(int))
+        
+        doc_topic_csv_path = f"{RESULTS_DIR}/document_topic_distribution.csv"
+        doc_topic_df.to_csv(doc_topic_csv_path, index=False)
+        logger.info(f"Saved document-topic distribution CSV to {doc_topic_csv_path}")
+    except Exception as e:
+        logger.warning(f"Could not export document-topic distribution CSV: {e}")
+    
+    # Export topic-word distribution as CSV
+    try:
+        topic_word_rows = []
+        for topic_id, words in enumerate(topic_words):
+            for word, prob in words:
+                topic_word_rows.append({
+                    'topic_id': topic_id,
+                    'word': word,
+                    'probability': float(prob)
+                })
+        
+        topic_word_df = pd.DataFrame(topic_word_rows)
+        topic_word_csv_path = f"{RESULTS_DIR}/topic_word_distribution.csv"
+        topic_word_df.to_csv(topic_word_csv_path, index=False)
+        logger.info(f"Saved topic-word distribution CSV to {topic_word_csv_path}")
+    except Exception as e:
+        logger.warning(f"Could not export topic-word distribution CSV: {e}")
     
     # Create visualization
     create_lda_visualization(

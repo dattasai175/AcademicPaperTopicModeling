@@ -15,7 +15,7 @@ import logging
 from tqdm import tqdm
 from config import (
     MIN_WORD_LENGTH, MAX_FEATURES_TFIDF, NGRAM_RANGE, 
-    MIN_DF, MAX_DF, RAW_DATA_DIR, PROCESSED_DATA_DIR
+    MIN_DF, MAX_DF, RAW_DATA_DIR, PROCESSED_DATA_DIR, USE_TFIDF_FOR_LDA
 )
 from utils import (
     ensure_dir, save_pickle, load_pickle, save_dataframe, 
@@ -57,10 +57,20 @@ class TextPreprocessor:
         self.stop_words = set(stopwords.words('english'))
         self.lemmatizer = WordNetLemmatizer()
         
-        # Add domain-specific stopwords
-        self.stop_words.update(['abstract', 'paper', 'propose', 'proposed', 
-                               'method', 'approach', 'result', 'results',
-                               'show', 'demonstrate', 'present', 'study'])
+        # Add domain-specific stopwords (more comprehensive)
+        self.stop_words.update([
+            'abstract', 'paper', 'propose', 'proposed', 'method', 'approach', 
+            'result', 'results', 'show', 'demonstrate', 'present', 'study',
+            'work', 'present', 'presented', 'propose', 'proposed', 'proposal',
+            'novel', 'new', 'approach', 'method', 'algorithm', 'framework',
+            'model', 'models', 'learning', 'learn', 'learned', 'training',
+            'data', 'dataset', 'datasets', 'experiment', 'experimental',
+            'evaluation', 'evaluate', 'performance', 'improve', 'improvement',
+            'problem', 'problems', 'solution', 'solutions', 'task', 'tasks',
+            'using', 'use', 'used', 'based', 'base', 'bases', 'provide',
+            'provides', 'proposed', 'propose', 'proposes', 'introduce',
+            'introduces', 'introduction', 'develop', 'develops', 'development'
+        ])
     
     def clean_text(self, text):
         """Clean and normalize text."""
@@ -98,8 +108,10 @@ class TextPreprocessor:
         filtered = [
             token for token in tokens
             if len(token) >= self.min_word_length
+            and len(token) <= 30  # Remove very long tokens (likely errors)
             and token not in self.stop_words
             and token.isalpha()  # Keep only alphabetic tokens
+            and not token.isdigit()  # Remove pure numbers
         ]
         return filtered
     
@@ -156,7 +168,7 @@ def create_bow_features(texts, min_df=MIN_DF, max_df=MAX_DF):
         max_df: Maximum document frequency
         
     Returns:
-        BOW matrix, vectorizer, dictionary (for Gensim), and corpus
+        Dictionary (for Gensim) and corpus
     """
     logger.info("Creating bag-of-words features for LDA...")
     
@@ -177,6 +189,81 @@ def create_bow_features(texts, min_df=MIN_DF, max_df=MAX_DF):
     logger.info(f"Corpus size: {len(corpus)} documents")
     
     return dictionary, corpus
+
+
+def _tokenize_text(text):
+    """Helper function for TF-IDF tokenization (can be pickled)."""
+    return text.split()
+
+
+def create_tfidf_features(texts, min_df=MIN_DF, max_df=MAX_DF, max_features=MAX_FEATURES_TFIDF):
+    """
+    Create TF-IDF features and convert to Gensim corpus format for LDA.
+    
+    Args:
+        texts: List of preprocessed text strings
+        min_df: Minimum document frequency
+        max_df: Maximum document frequency
+        max_features: Maximum number of features
+        
+    Returns:
+        Dictionary (for Gensim), TF-IDF corpus, and TF-IDF vectorizer
+    """
+    logger.info("Creating TF-IDF features for LDA...")
+    
+    from gensim.corpora import Dictionary
+    
+    # Create TF-IDF vectorizer first
+    # Use a proper function instead of lambda so it can be pickled
+    tfidf_vectorizer = TfidfVectorizer(
+        min_df=min_df,
+        max_df=max_df,
+        max_features=max_features,
+        ngram_range=NGRAM_RANGE,
+        lowercase=False,  # Already lowercase from preprocessing
+        tokenizer=_tokenize_text,  # Use proper function instead of lambda
+        token_pattern=None  # Disable default tokenization
+    )
+    
+    # Fit and transform
+    tfidf_matrix = tfidf_vectorizer.fit_transform(texts)
+    
+    # Get feature names (vocabulary)
+    feature_names = tfidf_vectorizer.get_feature_names_out()
+    
+    # Create Gensim dictionary from TF-IDF vocabulary
+    # Build dictionary with all words at once
+    dictionary = Dictionary()
+    dictionary.add_documents([[word] for word in feature_names])
+    
+    # Create mapping from TF-IDF feature index to Gensim dictionary ID
+    tfidf_to_gensim = {}
+    for tfidf_idx, word in enumerate(feature_names):
+        if word in dictionary.token2id:
+            gensim_id = dictionary.token2id[word]
+            tfidf_to_gensim[tfidf_idx] = gensim_id
+    
+    logger.info(f"TF-IDF matrix shape: {tfidf_matrix.shape}")
+    logger.info(f"Dictionary size: {len(dictionary)}")
+    
+    # Convert TF-IDF sparse matrix to Gensim corpus format
+    # Gensim corpus is a list of lists of (word_id, weight) tuples
+    corpus = []
+    for i in range(tfidf_matrix.shape[0]):
+        row = tfidf_matrix.getrow(i)
+        # Get non-zero indices and values
+        tfidf_indices = row.indices
+        tfidf_values = row.data
+        
+        # Map TF-IDF indices to Gensim dictionary IDs
+        doc_corpus = [(tfidf_to_gensim[int(tfidf_idx)], float(tfidf_score)) 
+                     for tfidf_idx, tfidf_score in zip(tfidf_indices, tfidf_values)]
+        corpus.append(doc_corpus)
+    
+    logger.info(f"TF-IDF corpus size: {len(corpus)} documents")
+    logger.info(f"Average words per document: {np.mean([len(doc) for doc in corpus]):.1f}")
+    
+    return dictionary, corpus, tfidf_vectorizer
 
 
 def run_preprocessing_pipeline(input_file=None, output_prefix='processed'):
@@ -205,22 +292,45 @@ def run_preprocessing_pipeline(input_file=None, output_prefix='processed'):
     ensure_dir(PROCESSED_DATA_DIR)
     save_dataframe(df_processed, output_file)
     
-    # Create BOW features for LDA
-    dictionary, corpus = create_bow_features(
+    # Create features for LDA (TF-IDF or BOW)
+    if USE_TFIDF_FOR_LDA:
+        logger.info("Using TF-IDF for LDA topic modeling...")
+        dictionary, corpus, tfidf_vectorizer = create_tfidf_features(
+            df_processed['processed_text'].tolist()
+        )
+        # Save TF-IDF vectorizer
+        save_pickle(tfidf_vectorizer, f"{PROCESSED_DATA_DIR}/{output_prefix}_tfidf_vectorizer.pkl")
+    else:
+        logger.info("Using BOW for LDA topic modeling...")
+        dictionary, corpus = create_bow_features(
+            df_processed['processed_text'].tolist()
+        )
+    
+    # Also create BOW for comparison/backup
+    dictionary_bow, corpus_bow = create_bow_features(
         df_processed['processed_text'].tolist()
     )
     
     # Save features
     save_pickle(dictionary, f"{PROCESSED_DATA_DIR}/{output_prefix}_dictionary.pkl")
     save_pickle(corpus, f"{PROCESSED_DATA_DIR}/{output_prefix}_corpus.pkl")
+    save_pickle(dictionary_bow, f"{PROCESSED_DATA_DIR}/{output_prefix}_dictionary_bow.pkl")
+    save_pickle(corpus_bow, f"{PROCESSED_DATA_DIR}/{output_prefix}_corpus_bow.pkl")
     
     logger.info("Preprocessing pipeline complete!")
     
-    return {
+    result = {
         'df': df_processed,
         'dictionary': dictionary,
-        'corpus': corpus
+        'corpus': corpus,
+        'dictionary_bow': dictionary_bow,
+        'corpus_bow': corpus_bow
     }
+    
+    if USE_TFIDF_FOR_LDA:
+        result['tfidf_vectorizer'] = tfidf_vectorizer
+    
+    return result
 
 
 if __name__ == "__main__":

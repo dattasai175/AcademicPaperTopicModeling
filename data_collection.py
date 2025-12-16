@@ -40,6 +40,10 @@ def collect_arxiv_abstracts(categories=None, max_results=None, min_year=None):
     all_papers = []
     collected_ids = set()
     
+    # Calculate papers per category for balanced collection
+    papers_per_category = max_results // len(categories)
+    logger.info(f"Target: ~{papers_per_category} papers per category")
+    
     # Search each category
     for category in categories:
         if len(all_papers) >= max_results:
@@ -50,18 +54,21 @@ def collect_arxiv_abstracts(categories=None, max_results=None, min_year=None):
         
         # Calculate how many results we need from this category
         remaining = max_results - len(all_papers)
-        results_per_category = min(remaining, ARXIV_MAX_RESULTS_PER_QUERY)
+        # Try to get balanced distribution, but allow flexibility
+        target_for_category = min(papers_per_category * 2, remaining, ARXIV_MAX_RESULTS_PER_QUERY)
         
         # Use pagination if we need more than ARXIV_MAX_RESULTS_PER_QUERY
         offset = 0
         category_count = 0
         
-        while len(all_papers) < max_results and offset < max_results:
+        category_target = min(papers_per_category * 2, max_results - len(all_papers))
+        
+        while len(all_papers) < max_results and category_count < category_target and offset < max_results:
             # Determine how many to fetch in this batch
             batch_size = min(
                 ARXIV_MAX_RESULTS_PER_QUERY,
-                max_results - len(all_papers),
-                max_results - offset
+                category_target - category_count,
+                max_results - len(all_papers)
             )
             
             if batch_size <= 0:

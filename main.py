@@ -10,11 +10,14 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 from config import *
+from config import USE_TFIDF_FOR_LDA, USE_LDA, USE_NMF, USE_BERTOPIC
 from utils import logger, ensure_dir
 from data_collection import collect_arxiv_abstracts
 from preprocessing import run_preprocessing_pipeline
 from topic_modeling import run_topic_modeling_pipeline
+from topic_modeling_comparison import run_all_topic_modeling_methods
 from evaluation import generate_analysis_report
+from evaluation_comparison import compare_all_methods
 
 
 def main():
@@ -54,40 +57,85 @@ def main():
         preprocessing_result = run_preprocessing_pipeline()
         logger.info(f"Preprocessed {len(preprocessing_result['df'])} abstracts")
         logger.info(f"Dictionary size: {len(preprocessing_result['dictionary'])}")
+        if USE_TFIDF_FOR_LDA:
+            logger.info("✅ Using TF-IDF weighted corpus for LDA (better topic quality)")
+        else:
+            logger.info("Using BOW corpus for LDA")
         
-        # Step 3: Topic Modeling
+        # Step 3: Topic Modeling (All Methods)
         logger.info("\n" + "=" * 60)
-        logger.info("STEP 3: Topic Modeling")
+        logger.info("STEP 3: Topic Modeling (LDA, NMF, BERTopic)")
         logger.info("=" * 60)
         
-        topic_modeling_result = run_topic_modeling_pipeline(
-            corpus=preprocessing_result['corpus'],
-            dictionary=preprocessing_result['dictionary'],
-            texts=[text.split() for text in preprocessing_result['df']['processed_text'].tolist()],
-            find_optimal=True
-        )
-        logger.info(f"Optimal number of topics: {topic_modeling_result['num_topics']}")
+        # Run all topic modeling methods
+        topic_modeling_results = run_all_topic_modeling_methods(find_optimal=True)
         
-        # Step 4: Analysis & Evaluation
+        # Log results for each method
+        for method_name, result in topic_modeling_results.items():
+            if result:
+                logger.info(f"{method_name.upper()}: {result['num_topics']} topics")
+        
+        # Step 4: Analysis & Evaluation (Comparison)
         logger.info("\n" + "=" * 60)
-        logger.info("STEP 4: Analysis & Evaluation")
+        logger.info("STEP 4: Analysis & Evaluation (Compare All Methods)")
         logger.info("=" * 60)
         
-        analysis_result = generate_analysis_report()
-        logger.info("Analysis complete!")
+        # Check which methods completed successfully
+        completed_methods = [name for name, result in topic_modeling_results.items() if result is not None]
+        logger.info(f"Methods completed: {', '.join([m.upper() for m in completed_methods])}")
+        
+        if len(completed_methods) == 0:
+            logger.warning("No topic modeling methods completed successfully!")
+        else:
+            # Compare all methods that completed
+            comparison_results = compare_all_methods()
+            
+            # Also run individual LDA analysis for backward compatibility
+            if USE_LDA and topic_modeling_results.get('lda'):
+                logger.info("\nGenerating detailed LDA analysis report...")
+                analysis_result = generate_analysis_report()
+                logger.info("LDA analysis complete!")
+        
+        logger.info("\n" + "=" * 60)
+        logger.info("METHOD COMPARISON SUMMARY")
+        logger.info("=" * 60)
+        
+        from utils import load_json
+        import os
+        
+        summary_file = f"{RESULTS_DIR}/method_comparison_summary.json"
+        if os.path.exists(summary_file):
+            summary = load_json(summary_file)
+            
+            if len(summary.get('methods', {})) > 0:
+                logger.info("\nClassification Accuracy (All Categories):")
+                for method, metrics in summary['methods'].items():
+                    logger.info(f"  {method.upper()}: {metrics['accuracy']:.4f} "
+                               f"(F1-weighted: {metrics['f1_weighted']:.4f})")
+                
+                if summary.get('best_method'):
+                    logger.info(f"\n🏆 Best Method: {summary['best_method'].upper()} "
+                               f"(Accuracy: {summary['best_accuracy']:.4f})")
+            else:
+                logger.warning("No methods available for comparison.")
+        else:
+            logger.warning("Comparison summary not found. Some methods may not have completed.")
         
         # Final Summary
         logger.info("\n" + "=" * 60)
         logger.info("PIPELINE COMPLETE!")
         logger.info("=" * 60)
         logger.info(f"Number of abstracts processed: {len(preprocessing_result['df'])}")
-        logger.info(f"Optimal number of topics: {topic_modeling_result['num_topics']}")
         
-        if analysis_result:
-            alignment = analysis_result['alignment_results']
-            logger.info(f"Adjusted Rand Index: {alignment['adjusted_rand_index']:.4f}")
-            logger.info(f"Normalized Mutual Information: {alignment['normalized_mutual_info']:.4f}")
-            logger.info(f"Average Topic Purity: {alignment['average_purity']:.4f}")
+        # Summary from comparison
+        if comparison_results:
+            logger.info("\nFinal Method Comparison:")
+            for method_name, result in comparison_results.items():
+                if result:
+                    metrics = result['classification_metrics']
+                    logger.info(f"  {method_name.upper()}: "
+                              f"Accuracy={metrics['accuracy']:.4f}, "
+                              f"F1-weighted={metrics['f1_weighted']:.4f}")
         
         logger.info("\nResults saved in:")
         logger.info(f"  - Models: {MODELS_DIR}/")
